@@ -1,7 +1,8 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 'use client';
 
 import { useEffect, useState } from 'react';
-import { supabase } from '../../../lib/supabaseClient';
+import { getSupabase } from '../../../lib/supabaseClient';
 import ProgressRing from '../_components/ProgressRing';
 import CelebrationModal from '../_components/CelebrationModal';
 import { Sprout } from 'lucide-react';
@@ -36,6 +37,7 @@ export default function Checkin() {
   // Load active (or latest) enrollment and check-ins
   useEffect(() => {
     (async () => {
+      const supabase = getSupabase();
       const uid = (await supabase.auth.getUser()).data.user?.id;
 
       const { data: e } = await supabase
@@ -77,6 +79,7 @@ export default function Checkin() {
   // Save today's check-in (one per day enforced by DB)
   const saveCheckin = async () => {
     if (!enr || !mission) return;
+    const supabase = getSupabase();
     const min = mission.goal_json?.per_day_steps ?? 5000;
     if (stepsInput < min) return alert(`Enter at least ${min} steps`);
 
@@ -103,9 +106,10 @@ export default function Checkin() {
     alert('Saved! Now mint your reward if you hit the goal.');
   };
 
-  // Mint reward (Daily = Day One Seed; Streak Day 3 = Banner)
+  // Mint reward
   const mintIfReady = async () => {
     if (!enr || !mission) return;
+    const supabase = getSupabase();
     const targetDays = mission.goal_json?.days ?? 1;
 
     const { data: checks } = await supabase
@@ -161,8 +165,9 @@ export default function Checkin() {
     window.location.href = '/kid/lockr';
   };
 
-  // Start the 3-day streak after finishing Daily
+  // Start 3-day streak after Daily
   const startThreeDayStreak = async () => {
+    const supabase = getSupabase();
     const uid = (await supabase.auth.getUser()).data.user?.id;
     const { data: three } = await supabase
       .from('missions')
@@ -188,7 +193,6 @@ export default function Checkin() {
 
   return (
     <div className="p-6 max-w-md mx-auto text-white">
-      {/* Title shows the earned reward name for clarity */}
       <h1 className="text-2xl font-bold">
         {mission.slug === 'daily_mission'
           ? 'Grow a Garden PIRL Seed'
