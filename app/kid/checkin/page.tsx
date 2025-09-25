@@ -34,44 +34,75 @@ export default function Checkin() {
   const [streak, setStreak] = useState(0);
   const [showCelebrate, setShowCelebrate] = useState(false);
 
-  // Load active (or latest) enrollment and check-ins
+  // Ensure session + auto-enroll Daily (fast path) + load data
   useEffect(() => {
     (async () => {
       const supabase = getSupabase();
-      const uid = (await supabase.auth.getUser()).data.user?.id;
 
-      const { data: e } = await supabase
+      // 1) Ensure anon session
+      const session = (await supabase.auth.getSession()).data.session;
+      if (!session) await supabase.auth.signInAnonymously();
+
+      const uid = (await supabase.auth.getUser()).data.user?.id;
+      if (!uid) { window.location.href = '/'; return; }
+
+      // 2) Check for active enrollment
+      const { data: active } = await supabase
         .from('enrollments')
-        .select('*, missions(*)')
+        .select('id, status, missions!inner(slug, title, goal_json)')
         .eq('kid_id', uid)
-        .order('started_at', { ascending: false })
-        .limit(1)
+        .eq('status', 'active')
         .maybeSingle();
 
-      if (!e) {
-        window.location.href = '/kid/missions';
-        return;
+      let enrollment = active;
+
+      // 3) If none, auto-enroll Daily Mission here
+      if (!enrollment) {
+        const { data: daily } = await supabase
+          .from('missions')
+          .select('id, slug, title, goal_json')
+          .eq('slug', 'daily_mission')
+          .maybeSingle();
+
+        if (!daily?.id) { alert('Daily mission not found.'); return; }
+
+        const { error } = await supabase
+          .from('enrollments')
+          .insert({ mission_id: daily.id, kid_id: uid });
+        if (error) { alert('Could not start your mission.'); return; }
+
+        const { data: nowActive } = await supabase
+          .from('enrollments')
+          .select('id, status, missions!inner(slug, title, goal_json)')
+          .eq('kid_id', uid)
+          .eq('status', 'active')
+          .maybeSingle();
+
+        enrollment = nowActive ?? null;
       }
 
-      const m = (e as any).missions as MissionRow;
-      setEnr(e as unknown as EnrollmentRow);
+      if (!enrollment) return;
+
+      // 4) Set mission + enrollment state
+      setEnr(enrollment as any);
+      const m = (enrollment as any).missions as MissionRow;
       setMission(m);
 
+      // 5) Load check-ins once
       const { data: checks } = await supabase
         .from('checkins')
         .select('day_index, data_json')
-        .eq('enrollment_id', e.id)
+        .eq('enrollment_id', (enrollment as any).id)
         .order('day_index', { ascending: true });
 
       const len = checks?.length ?? 0;
       setDayIndex(len);
-
       if (len > 0) {
         const last = checks![len - 1]?.data_json?.steps ?? 0;
         setTodayTotal(last);
       }
 
-      setSeedUnlocked(m.slug === 'daily_mission' && e.status === 'completed');
+      setSeedUnlocked(m.slug === 'daily_mission' && (enrollment as any).status === 'completed');
       setStreak(m.slug === 'three_day_streak' ? len : 0);
     })();
   }, []);
@@ -141,10 +172,7 @@ export default function Checkin() {
       title: rewardTitle,
       type: 'badge',
     });
-    if (artErr) {
-      alert(artErr.message);
-      return;
-    }
+    if (artErr) { alert(artErr.message); return; }
 
     setShowCelebrate(true);
     confetti({
@@ -247,7 +275,7 @@ export default function Checkin() {
           <div className="text-sm font-semibold text-emerald-300">
             {seedUnlocked ? 'Unlocked:' : 'Complete today to unlock:'}
           </div>
-          <div className="text-base font-bold text-white">PIRL Seed</div>
+        <div className="text-base font-bold text-white">PIRL Seed</div>
         </div>
         <div
           className={`rounded-full p-2 ${

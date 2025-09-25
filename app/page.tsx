@@ -18,8 +18,8 @@ export default function Home() {
     const cleaned = name.trim();
     if (!cleaned) return;
     localStorage.setItem('pirlName', cleaned);
-    // Best practice: client-side navigation
-    router.push('/kid/missions');
+    // First-time users go straight to their mission
+    router.push('/kid/checkin');
   };
 
   return (
