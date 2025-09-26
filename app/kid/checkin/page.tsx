@@ -29,85 +29,74 @@ export default function Checkin() {
   const [dayIndex, setDayIndex] = useState(0);
   const [stepsInput, setStepsInput] = useState<number>(0);
   const [todayTotal, setTodayTotal] = useState<number>(0);
-  const [justCompletedDaily, setJustCompletedDaily] = useState(false);
   const [seedUnlocked, setSeedUnlocked] = useState(false);
   const [streak, setStreak] = useState(0);
   const [showCelebrate, setShowCelebrate] = useState(false);
 
-  // DEBUG STATUS
+  // (debug) simple status line while loading
   const [status, setStatus] = useState('starting…');
 
-  // Ensure session + auto-enroll Daily (fast path) + load data
+  // Ensure session + auto-enroll Daily + load current progress
   useEffect(() => {
     (async () => {
       try {
         const supabase = getSupabase();
 
-        // 1) Ensure anon session
         setStatus('ensuring session…');
         const session = (await supabase.auth.getSession()).data.session;
         if (!session) await supabase.auth.signInAnonymously();
 
-        // 2) Get user id
         setStatus('getting user…');
         const uid = (await supabase.auth.getUser()).data.user?.id;
         if (!uid) { setStatus('no user id; redirecting…'); window.location.href = '/'; return; }
 
-        // 3) Check for active enrollment
-        setStatus('checking active enrollment…');
-        const { data: active, error: activeErr } = await supabase
+        setStatus('checking enrollment…');
+        const { data: active } = await supabase
           .from('enrollments')
           .select('id, status, missions!inner(slug, title, goal_json)')
           .eq('kid_id', uid)
           .eq('status', 'active')
           .maybeSingle();
-        if (activeErr) { setStatus(`active err: ${activeErr.message}`); return; }
 
         let enrollment = active;
 
-        // 4) If none, auto-enroll Daily Mission here
         if (!enrollment) {
-          setStatus('auto-enrolling daily mission…');
-          const { data: daily, error: dailyErr } = await supabase
+          setStatus('auto-enrolling daily…');
+          const { data: daily } = await supabase
             .from('missions')
             .select('id, slug, title, goal_json')
             .eq('slug', 'daily_mission')
             .maybeSingle();
-          if (dailyErr) { setStatus(`daily mission err: ${dailyErr.message}`); return; }
+
           if (!daily?.id) { setStatus('daily mission not found'); return; }
 
           const { error: insErr } = await supabase
             .from('enrollments')
             .insert({ mission_id: daily.id, kid_id: uid });
-          if (insErr) { setStatus(`enroll insert err: ${insErr.message}`); return; }
+          if (insErr) { setStatus(`enroll error: ${insErr.message}`); return; }
 
-          setStatus('refetching active enrollment…');
-          const { data: nowActive, error: nowErr } = await supabase
+          const { data: nowActive } = await supabase
             .from('enrollments')
             .select('id, status, missions!inner(slug, title, goal_json)')
             .eq('kid_id', uid)
             .eq('status', 'active')
             .maybeSingle();
-          if (nowErr) { setStatus(`refetch err: ${nowErr.message}`); return; }
 
           enrollment = nowActive ?? null;
         }
 
-        if (!enrollment) { setStatus('enrollment still null'); return; }
+        if (!enrollment) { setStatus('enrollment null'); return; }
 
-        // 5) Set mission + enrollment state
         setEnr(enrollment as any);
         const m = (enrollment as any).missions as MissionRow;
         setMission(m);
 
-        // 6) Load check-ins once
         setStatus('loading check-ins…');
-        const { data: checks, error: chkErr } = await supabase
+        const { data: checks } = await supabase
           .from('checkins')
           .select('day_index, data_json')
           .eq('enrollment_id', (enrollment as any).id)
           .order('day_index', { ascending: true });
-        if (chkErr) { setStatus(`checks err: ${chkErr.message}`); return; }
 
         const len = checks?.length ?? 0;
         setDayIndex(len);
@@ -121,23 +110,28 @@ export default function Checkin() {
 
         setStatus('ready');
       } catch (e: any) {
-        setStatus(`exception: ${e?.message || 'unknown error'}`);
+        setStatus(`exception: ${e?.message || 'unknown'}`);
       }
     })();
   }, []);
 
-  // Save today's check-in (one per day enforced by DB)
+  // Save today's check-in (one per day enforced by DB unique index)
   const saveCheckin = async () => {
     if (!enr || !mission) return;
     const supabase = getSupabase();
     const min = mission.goal_json?.per_day_steps ?? 5000;
-    if (stepsInput < min) return alert(`Enter at least ${min} steps`);
+
+    if (stepsInput < min) {
+      // allow partials if you ever want; for MVP insist on goal entry
+      alert(`Enter at least ${min} steps`);
+      return;
+    }
 
     const { error } = await supabase.from('checkins').insert({
       enrollment_id: enr.id,
       day_index: dayIndex,
-      data_json: { steps: stepsInput },
-      day_key: new Date().toISOString().slice(0, 10), // UTC date
+      data_json: { steps: stepsInput, source: 'manual' },
+      day_key: new Date().toISOString().slice(0, 10), // UTC day
     });
 
     if (error) {
@@ -149,26 +143,32 @@ export default function Checkin() {
       return;
     }
 
+    // Update UI
     setTodayTotal(stepsInput);
     setStepsInput(0);
     setDayIndex((d) => d + 1);
     if (mission.slug === 'three_day_streak') setStreak((s) => s + 1);
-    alert('Saved! Now mint your reward if you hit the goal.');
+
+    // 🎉 Auto-celebrate now (no mint yet)
+    setShowCelebrate(true);
+    confetti({ particleCount: 120, spread: 70, origin: { y: 0.6 } });
   };
 
-  // Mint reward
+  // Mint when the player taps “Add to My Locker” in the celebration modal
   const mintIfReady = async () => {
     if (!enr || !mission) return;
     const supabase = getSupabase();
     const targetDays = mission.goal_json?.days ?? 1;
 
+    // Double-check eligibility (defensive)
     const { data: checks } = await supabase
       .from('checkins')
       .select('id')
       .eq('enrollment_id', enr.id);
 
     if ((checks?.length || 0) < targetDays) {
-      return alert(`Finish ${targetDays} day(s) first`);
+      alert(`Finish ${targetDays} day(s) first`);
+      return;
     }
 
     const uid = (await supabase.auth.getUser()).data.user?.id;
@@ -185,6 +185,8 @@ export default function Checkin() {
         ? 'Exclusive Fortnite Banner'
         : 'Unlocked Reward';
 
+    // optional idempotency: prevent dupes (one artifact per mission per kid)
+    // add a unique index on (kid_id, mission_id) if you want hard guarantees.
     const { error: artErr } = await supabase.from('artifacts').insert({
       kid_id: uid,
       mission_id: mission.id,
@@ -193,50 +195,18 @@ export default function Checkin() {
     });
     if (artErr) { alert(artErr.message); return; }
 
-    setShowCelebrate(true);
-    confetti({
-      particleCount: mission.slug === 'daily_mission' ? 120 : 150,
-      spread: 70,
-      origin: { y: 0.6 },
-    });
-
-    if (mission.slug === 'daily_mission') {
-      setSeedUnlocked(true);
-      setJustCompletedDaily(true);
-    }
-  };
-
-  // Close modal and go to LOCKR
-  const addToLockr = () => {
+    // Go to LOCKR
     setShowCelebrate(false);
     window.location.href = '/kid/lockr';
   };
 
-  // Start 3-day streak after Daily
-  const startThreeDayStreak = async () => {
-    const supabase = getSupabase();
-    const uid = (await supabase.auth.getUser()).data.user?.id;
-    const { data: three } = await supabase
-      .from('missions')
-      .select('id')
-      .eq('slug', 'three_day_streak')
-      .maybeSingle();
-    if (!three?.id) return alert('3-Day Streak mission not found.');
-
-    const { error } = await supabase
-      .from('enrollments')
-      .insert({ mission_id: three.id, kid_id: uid });
-    if (error) return alert(error.message);
-
-    alert('3-Day Streak started! Let’s keep it going.');
-    window.location.href = '/kid/checkin';
-  };
-
-  if (!mission) return (
-    <div className="p-6 text-white">
-      Loading… <span className="text-white/70">{status}</span>
-    </div>
-  );
+  if (!mission) {
+    return (
+      <div className="p-6 text-white">
+        Loading… <span className="text-white/70">{status}</span>
+      </div>
+    );
+  }
 
   const targetDays = mission.goal_json?.days ?? 1;
   const min = mission.goal_json?.per_day_steps ?? 5000;
@@ -269,11 +239,11 @@ export default function Checkin() {
         </div>
       </div>
 
-      {/* Input + add */}
+      {/* Input + Add (no Mint button) */}
       <div className="mt-4 flex gap-2">
         <input
           className="flex-1 rounded-md bg-white/10 border border-white/20 p-3 text-white placeholder:text-white/50"
-          placeholder="Enter steps"
+          placeholder="Enter steps (≥ 5000)"
           type="number"
           value={stepsInput}
           onChange={(e) => setStepsInput(+e.target.value)}
@@ -286,7 +256,7 @@ export default function Checkin() {
         </button>
       </div>
 
-      {/* PIRL Seed card */}
+      {/* Seed card */}
       <div
         className={`mt-6 rounded-xl p-4 flex items-center justify-between border ${
           seedUnlocked
@@ -322,43 +292,10 @@ export default function Checkin() {
         </div>
       </div>
 
-      {/* Mint + next step */}
-      {!justCompletedDaily ? (
-        <div className="mt-4">
-          <button
-            onClick={mintIfReady}
-            className="w-full rounded-md bg-emerald-500 hover:bg-emerald-400 text-white font-semibold py-3"
-          >
-            Mint reward
-          </button>
-        </div>
-      ) : (
-        <div className="mt-6 rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-4">
-          <div className="font-semibold mb-2">
-            Great job — Daily Mission complete!
-          </div>
-          <p className="text-sm mb-3">
-            Keep it up for 3 days to earn a new reward.
-          </p>
-          <button
-            onClick={startThreeDayStreak}
-            className="w-full rounded-md bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-3"
-          >
-            Go for 3-Day Streak!
-          </button>
-          <a
-            href="/kid/lockr"
-            className="mt-2 block text-center underline text-sm"
-          >
-            See your LOCKR
-          </a>
-        </div>
-      )}
-
-      {/* Celebration Modal */}
+      {/* Celebration Modal (mint happens on CTA) */}
       <CelebrationModal
         open={showCelebrate}
-        onAddToLockr={addToLockr}
+        onAddToLockr={mintIfReady}          // <-- mint on button tap
         onClose={() => setShowCelebrate(false)}
         title="Mission Complete!"
         rewardTitle={
